@@ -1,0 +1,117 @@
+def REQUIRED_TOOLS = []
+def ML_TOOLKIT = ''
+
+pipeline {
+	agent none
+
+	parameters {
+		string(name: 'DB_TEST_NAME', defaultValue: 'Qwen2.5-1.5B-Instruct_Basic', description: 'test_name of the definition in validation.test_definitions, e.g. Qwen2.5-1.5B-Instruct_Basic')
+	}
+	triggers {
+		pollSCM('')
+	}
+
+	stages {
+		stage('Discover Tools') {
+			steps {
+				script {
+					node ("python"){
+						cleanWs()
+						echo "START-SCM-CHECKOUT"
+						checkout scm
+						echo "FINISH-SCM-CHECKOUT"
+						dir('test_suite') {
+							echo "START-PIP-INSTALL"
+							sh  """
+								python3 -m venv .discovery_venv
+								./.discovery_venv/bin/pip -q install --upgrade pip pymongo
+								"""
+							echo "FINISH-PIP-INSTALL"
+
+							withCredentials([string(credentialsId: 'mongodb-connection-str', variable: 'MONGO_URI')]) {
+								def toolsJson = sh(script: "./.discovery_venv/bin/python discover_types.py ${DB_TEST_NAME}", returnStdout: true).trim()
+								def parsedResult = readJSON text: toolsJson
+								REQUIRED_TOOLS = parsedResult.unique_tools
+								ML_TOOLKIT = parsedResult.ml_toolkit
+								echo "Detected ML Toolkit: ${ML_TOOLKIT}"
+								echo "Required Tools: ${REQUIRED_TOOLS}"
+
+							}
+						}
+					}
+				}
+			}
+		}
+
+		stage('Run Benchmarks') {
+			steps {
+				script {
+					if (REQUIRED_TOOLS.isEmpty()) {
+						echo "No tools required for the current test plans. Exiting."
+						return
+					}
+
+					def parallelTasks = [:]
+
+					for (int i = 0; i < REQUIRED_TOOLS.size(); i++) {
+						def toolName = REQUIRED_TOOLS[i]
+
+						parallelTasks["Bench-${toolName}"] = {
+							node("intel"){
+								stage("Run ${toolName}") {
+									cleanWs()
+									echo "START-SCM-CHECKOUT"
+									checkout scm
+									echo "FINISH-SCM-CHECKOUT"
+
+									dir('test_suite') {
+										sh "python3 -m venv .venv"
+										echo "START-PIP-INSTALL"
+										sh "./.venv/bin/pip -q install --upgrade pip"
+										echo "FINISH-PIP-INSTALL"
+
+										echo "START-PIP-INSTALL"
+										sh "./.venv/bin/pip -q install -e '.[${toolName}]'"
+										echo "FINISH-PIP-INSTALL"
+
+										echo "START-PIP-INSTALL"
+										sh "./.venv/bin/pip -q install -e '.[${ML_TOOLKIT}]'"
+										echo "FINISH-PIP-INSTALL"
+
+										catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+											withCredentials([string(credentialsId: 'mongodb-connection-str', variable: 'MONGO_URI')]) {
+												withEnv(["DB_TEST_NAME=${params.DB_TEST_NAME}"]) {
+													sh "./.venv/bin/pytest run_tests.py --tool-filter=${toolName} -v -s -o log_cli=true --log-cli-level=INFO --junitxml=results_${toolName}.xml"
+												}
+											}
+										}
+										stash name: "results-${toolName}", includes: "results_${toolName}.xml"
+									}
+								}
+							}
+						}
+					}
+					parallel parallelTasks
+				}
+			}
+		}
+	}
+	post {
+		always {
+			script {
+				if (!REQUIRED_TOOLS.isEmpty()) {
+					node {
+						for (int i = 0; i < REQUIRED_TOOLS.size(); i++) {
+							try {
+								unstash "results-${REQUIRED_TOOLS[i]}"
+							} catch (Exception e) {
+								echo "Could not unstash results for ${REQUIRED_TOOLS[i]}"
+							}
+						}
+						junit 'results_*.xml'
+					}
+				}
+			}
+		}
+	}
+}

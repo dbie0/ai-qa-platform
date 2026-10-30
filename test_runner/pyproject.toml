@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-qa-platform_test_suite"
+version = "0.1.0"
+dependencies = [
+    "pytest>=7.0",
+    "pymongo>=4.0"
+]
+
+[project.entry-points."tests"]
+"lm-eval" = "tests.accuracy.lm_eval.main:LmEvalAdapter"
+"py_benchmark" = "tests.performance.py_benchmark.main:PyBenchAdapter"
+
+[project.entry-points."model_processors"]
+"optimum_ov" = "model_processor.optimum_ov:OptimumAdapter"
+"dummy" = "model_processor.dummy:DummyAdapter"
+
+[tool.setuptools.packages.find]
+include = ["common*", "tests*", "model_processor*"]
+
+[project.optional-dependencies]
+optimum_ov = [
+    "optimum-intel@git+https://github.com/huggingface/optimum-intel.git",
+    "datasets"
+]
+lm-eval = [
+    "lm-eval>=0.4.0",
+    "datasets>=2.0.0",
+    "accelerate",
+]
+py-benchmark = [
+    "requests>=1.0.0"
+]
